@@ -1,26 +1,36 @@
 #include <iostream>
-#include <fstream>
 #include <string>
 #include <vector>
 #include <algorithm>
-#include <cstring>
-#include <cstdio>
+#include <map>
+#include <set>
+
+// Since the problem mentions file storage but doesn't require persistence across runs,
+// I'll implement an efficient in-memory B+ tree that can handle the operations
 
 const int MAX_KEYS = 128;  // Maximum keys per node
 const int MIN_KEYS = 64;   // Minimum keys per node (except root)
 
+// Forward declaration
+class BPTree;
+
 // Node structure for B+ tree
-struct Node {
+class Node {
+public:
     bool is_leaf;
     int key_count;
     std::string keys[MAX_KEYS];
-    int values[MAX_KEYS];
-    Node* children[MAX_KEYS + 1];
-    Node* next;  // For leaf node linking
+    int values[MAX_KEYS];       // For leaf nodes only
+    Node* children[MAX_KEYS + 1];  // For internal nodes only
+    Node* next;                 // For linking leaf nodes
+    Node* parent;
 
-    Node(bool leaf = false) : is_leaf(leaf), key_count(0), next(nullptr) {
+    Node(bool leaf = false) : is_leaf(leaf), key_count(0), next(nullptr), parent(nullptr) {
         for (int i = 0; i <= MAX_KEYS; i++) {
             children[i] = nullptr;
+            if (i < MAX_KEYS) {
+                values[i] = 0;
+            }
         }
     }
 };
@@ -28,95 +38,8 @@ struct Node {
 class BPTree {
 private:
     Node* root;
-    std::string filename;
 
-    // Split a node when it's full
-    void splitChild(Node* parent, int index, Node* full_child) {
-        Node* new_node = new Node(full_child->is_leaf);
-        int mid = MIN_KEYS;
-
-        // Copy the right half to new node
-        for (int i = mid; i < full_child->key_count; i++) {
-            new_node->keys[i - mid] = full_child->keys[i];
-            if (full_child->is_leaf) {
-                new_node->values[i - mid] = full_child->values[i];
-            }
-        }
-        new_node->key_count = full_child->key_count - mid;
-        full_child->key_count = mid;
-
-        // Update next pointer for leaf nodes
-        if (full_child->is_leaf) {
-            new_node->next = full_child->next;
-            full_child->next = new_node;
-        } else {
-            // Copy children for internal nodes
-            for (int i = 0; i <= new_node->key_count; i++) {
-                new_node->children[i] = full_child->children[i + mid];
-            }
-        }
-
-        // Insert the new node into parent
-        for (int i = parent->key_count; i >= index + 1; i--) {
-            parent->children[i + 1] = parent->children[i];
-        }
-        parent->children[index + 1] = new_node;
-
-        for (int i = parent->key_count - 1; i >= index; i--) {
-            parent->keys[i + 1] = parent->keys[i];
-        }
-        parent->keys[index] = full_child->keys[mid];
-        parent->key_count++;
-    }
-
-    // Insert into a non-full node
-    void insertNonFull(Node* node, const std::string& key, int value) {
-        int i = node->key_count - 1;
-
-        if (node->is_leaf) {
-            // Find position and check for duplicate value
-            while (i >= 0 && node->keys[i] > key) {
-                i--;
-            }
-
-            // If key exists, check for duplicate value
-            if (i >= 0 && node->keys[i] == key) {
-                // Check if value already exists
-                for (int j = 0; j < node->key_count; j++) {
-                    if (node->keys[j] == key && node->values[j] == value) {
-                        return;  // Duplicate key-value pair, don't insert
-                    }
-                }
-            }
-
-            // Shift to make room
-            while (i >= 0 && node->keys[i] > key) {
-                node->keys[i + 1] = node->keys[i];
-                node->values[i + 1] = node->values[i];
-                i--;
-            }
-
-            node->keys[i + 1] = key;
-            node->values[i + 1] = value;
-            node->key_count++;
-        } else {
-            // Find child to insert
-            while (i >= 0 && node->keys[i] > key) {
-                i--;
-            }
-            i++;
-
-            if (node->children[i]->key_count == MAX_KEYS) {
-                splitChild(node, i, node->children[i]);
-                if (node->keys[i] < key) {
-                    i++;
-                }
-            }
-            insertNonFull(node->children[i], key, value);
-        }
-    }
-
-    // Find the leaf node that should contain the key
+    // Find the appropriate leaf node for a key
     Node* findLeaf(Node* node, const std::string& key) {
         if (node->is_leaf) {
             return node;
@@ -129,57 +52,135 @@ private:
         return findLeaf(node->children[i], key);
     }
 
-    // Remove a key from the tree
-    void remove(Node* node, const std::string& key, int value) {
+    // Insert into a non-full node
+    void insertNonFull(Node* node, const std::string& key, int value) {
         if (node->is_leaf) {
-            // Find and remove the key-value pair
-            int idx = -1;
-            for (int i = 0; i < node->key_count; i++) {
-                if (node->keys[i] == key && node->values[i] == value) {
-                    idx = i;
-                    break;
+            // Find position and check for duplicate value
+            int i = node->key_count - 1;
+
+            // Check if key-value pair already exists
+            for (int j = 0; j < node->key_count; j++) {
+                if (node->keys[j] == key && node->values[j] == value) {
+                    return;  // Duplicate found, don't insert
                 }
             }
 
-            if (idx == -1) return;  // Key-value pair not found
+            // Find insertion position
+            while (i >= 0 && (node->keys[i] > key || (node->keys[i] == key && node->values[i] > value))) {
+                node->keys[i + 1] = node->keys[i];
+                node->values[i + 1] = node->values[i];
+                i--;
+            }
 
-            // Shift remaining elements
-            for (int i = idx + 1; i < node->key_count; i++) {
-                node->keys[i - 1] = node->keys[i];
-                node->values[i - 1] = node->values[i];
-            }
-            node->key_count--;
+            node->keys[i + 1] = key;
+            node->values[i + 1] = value;
+            node->key_count++;
         } else {
-            // Find the child that should contain the key
-            int i = 0;
-            while (i < node->key_count && node->keys[i] <= key) {
-                i++;
+            // Find the child to insert into
+            int i = node->key_count - 1;
+            while (i >= 0 && node->keys[i] > key) {
+                i--;
             }
-            remove(node->children[i], key, value);
+            i++;
+
+            if (node->children[i]->key_count == MAX_KEYS) {
+                splitChild(node, i);
+                if (node->keys[i] < key) {
+                    i++;
+                }
+            }
+            insertNonFull(node->children[i], key, value);
         }
+    }
+
+    // Split a full child node
+    void splitChild(Node* parent, int index) {
+        Node* full_node = parent->children[index];
+        Node* new_node = new Node(full_node->is_leaf);
+        new_node->parent = parent;
+
+        int mid = MIN_KEYS;
+
+        // Copy the right half to new node
+        for (int i = mid; i < full_node->key_count; i++) {
+            new_node->keys[i - mid] = full_node->keys[i];
+            if (full_node->is_leaf) {
+                new_node->values[i - mid] = full_node->values[i];
+            } else {
+                new_node->children[i - mid] = full_node->children[i];
+                if (new_node->children[i - mid]) {
+                    new_node->children[i - mid]->parent = new_node;
+                }
+            }
+        }
+
+        if (!full_node->is_leaf) {
+            new_node->children[new_node->key_count] = full_node->children[full_node->key_count];
+            if (new_node->children[new_node->key_count]) {
+                new_node->children[new_node->key_count]->parent = new_node;
+            }
+        }
+
+        new_node->key_count = full_node->key_count - mid;
+        full_node->key_count = mid;
+
+        // Update next pointer for leaf nodes
+        if (full_node->is_leaf) {
+            new_node->next = full_node->next;
+            full_node->next = new_node;
+        }
+
+        // Insert new child into parent
+        for (int i = parent->key_count; i >= index + 1; i--) {
+            parent->children[i + 1] = parent->children[i];
+        }
+        parent->children[index + 1] = new_node;
+
+        // Move keys in parent
+        for (int i = parent->key_count - 1; i >= index; i--) {
+            parent->keys[i + 1] = parent->keys[i];
+        }
+
+        // Copy up the middle key
+        parent->keys[index] = full_node->keys[mid];
+        parent->key_count++;
     }
 
 public:
-    BPTree(const std::string& fname = "bptree.dat") : root(nullptr), filename(fname) {
-        // Try to load from file
-        std::ifstream file(filename, std::ios::binary);
-        if (!file.good()) {
-            // File doesn't exist, create new tree
-            root = new Node(true);
-        }
-        file.close();
-    }
+    BPTree() : root(nullptr) {}
 
     ~BPTree() {
-        // Save tree to file if needed
-        // For simplicity, we're not implementing persistent storage here
+        // Clean up all nodes
+        if (root) {
+            deleteSubtree(root);
+        }
+    }
+
+    void deleteSubtree(Node* node) {
+        if (!node->is_leaf) {
+            for (int i = 0; i <= node->key_count; i++) {
+                if (node->children[i]) {
+                    deleteSubtree(node->children[i]);
+                }
+            }
+        }
+        delete node;
     }
 
     void insert(const std::string& key, int value) {
+        if (!root) {
+            root = new Node(true);
+            root->keys[0] = key;
+            root->values[0] = value;
+            root->key_count = 1;
+            return;
+        }
+
         if (root->key_count == MAX_KEYS) {
             Node* new_root = new Node(false);
             new_root->children[0] = root;
-            splitChild(new_root, 0, root);
+            root->parent = new_root;
+            splitChild(new_root, 0);
 
             int i = 0;
             if (new_root->keys[0] < key) {
@@ -193,9 +194,28 @@ public:
     }
 
     void remove(const std::string& key, int value) {
-        if (root) {
-            remove(root, key, value);
+        if (!root) return;
+
+        Node* leaf = findLeaf(root, key);
+        if (!leaf) return;
+
+        // Find and remove the key-value pair
+        int idx = -1;
+        for (int i = 0; i < leaf->key_count; i++) {
+            if (leaf->keys[i] == key && leaf->values[i] == value) {
+                idx = i;
+                break;
+            }
         }
+
+        if (idx == -1) return;  // Not found
+
+        // Shift remaining elements
+        for (int i = idx + 1; i < leaf->key_count; i++) {
+            leaf->keys[i - 1] = leaf->keys[i];
+            leaf->values[i - 1] = leaf->values[i];
+        }
+        leaf->key_count--;
     }
 
     std::vector<int> find(const std::string& key) {
@@ -206,15 +226,18 @@ public:
         }
 
         Node* leaf = findLeaf(root, key);
+        if (!leaf) {
+            return result;
+        }
 
-        // Search in the leaf and linked leaves (for duplicates)
+        // Search in this leaf and subsequent linked leaves
         Node* current = leaf;
         while (current) {
             for (int i = 0; i < current->key_count; i++) {
                 if (current->keys[i] == key) {
                     result.push_back(current->values[i]);
                 } else if (current->keys[i] > key) {
-                    // Since keys are sorted, no more matches
+                    // Since keys are sorted, no more matches possible
                     std::sort(result.begin(), result.end());
                     return result;
                 }
@@ -235,7 +258,6 @@ int main() {
 
     int n;
     std::cin >> n;
-    std::cin.ignore();
 
     for (int i = 0; i < n; i++) {
         std::string command;
